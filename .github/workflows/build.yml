@@ -1,0 +1,43 @@
+name: Build FuckEngine dylib
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Compile FuckEngine.dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+
+          clang -arch arm64 -arch arm64e \
+            -isysroot "$SDK" \
+            -dynamiclib \
+            -O2 \
+            -fobjc-arc \
+            -install_name "templates/FuckEngine.dylib" \
+            -o FuckEngine.template.dylib \
+            FuckEngine.m \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreFoundation
+
+          echo "=== Build info ==="
+          ls -lh FuckEngine.template.dylib
+          echo "=== Mach-O sections ==="
+          otool -l FuckEngine.template.dylib | grep -A 4 "fuckeng" | head -30
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: FuckEngine-template-dylib
+          path: FuckEngine.template.dylib
