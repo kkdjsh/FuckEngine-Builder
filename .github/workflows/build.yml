@@ -1,4 +1,4 @@
-name: Build FuckEngine dylib
+name: Build GOATHook dylib
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
-      - name: Compile FuckEngine.dylib
+      - name: Compile GOATHook.dylib
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK: $SDK"
@@ -24,20 +24,20 @@ jobs:
             -dynamiclib \
             -O2 \
             -fobjc-arc \
-            -install_name "templates/FuckEngine.dylib" \
-            -o FuckEngine.template.dylib \
-            FuckEngine.m \
+            -install_name "GOATHook.dylib" \
+            -o GOATHook.template.dylib \
+            GOATHook.m \
             -framework Foundation \
             -framework UIKit \
             -framework CoreFoundation
 
           echo "=== Build info ==="
-          ls -lh FuckEngine.template.dylib
-          echo "=== Mach-O sections ==="
-          otool -l FuckEngine.template.dylib | grep -A 4 "fuckeng" | head -30
+          ls -lh GOATHook.template.dylib
+          echo "=== Sections ==="
+          otool -l GOATHook.template.dylib | grep -A 4 "goat" | head -30
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
-          name: FuckEngine-template-dylib
-          path: FuckEngine.template.dylib
+          name: GOATHook-template-dylib
+          path: GOATHook.template.dylib
