@@ -1,6 +1,7 @@
 //
 //  GOATHook.m
-//  纯 C 函数 IMP + 网络 Mock 版本
+//  纯 C 函数 IMP 版本（不用 imp_implementationWithBlock）
+//  签名注入环境下最稳定
 //
 
 #import <Foundation/Foundation.h>
@@ -129,77 +130,19 @@ static void apply_all_hooks(void) {
         if (!obj) return;
 
         NSArray *hooks = nil;
-        NSArray *networkRules = nil;
         if ([obj isKindOfClass:[NSArray class]]) {
             hooks = (NSArray *)obj;
         } else if ([obj isKindOfClass:[NSDictionary class]]) {
             hooks = obj[@"hooks"];
-            networkRules = obj[@"networkRules"];
         }
 
         for (NSDictionary *h in hooks) {
             @try { apply_single_hook(h); } @catch (__unused NSException *e) {}
         }
-
-        // 启用网络正则替换
-        if (networkRules) {
-            @try { enable_network_hook(networkRules); } @catch (__unused NSException *e) {}
-        }
     }
 }
 
-#pragma mark - 网络响应拦截（正则替换）
-static NSArray *g_networkRules = nil;
-static IMP g_orig_dataTask = NULL;
-
-static NSData *apply_regex_rules(NSData *data, NSString *url) {
-    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!body) return data;
-    BOOL modified = NO;
-    for (NSDictionary *group in g_networkRules) {
-        NSString *domain = group[@"domain"];
-        if (domain && [url containsString:domain]) {
-            for (NSDictionary *rule in group[@"rules"]) {
-                NSString *key = rule[@"key"];
-                NSString *value = rule[@"value"];
-                if (key && value) {
-                    NSRegularExpression *re = [NSRegularExpression
-                        regularExpressionWithPattern:key options:0 error:nil];
-                    if (re) {
-                        body = [re stringByReplacingMatchesInString:body
-                            options:0 range:NSMakeRange(0, body.length) withTemplate:value];
-                        modified = YES;
-                    }
-                }
-            }
-        }
-    }
-    return modified ? [body dataUsingEncoding:NSUTF8StringEncoding] : data;
-}
-
-static id goat_dataTask_hook(id self, SEL _cmd, NSURLRequest *req, id completion) {
-    __block NSString *urlStr = req.URL.absoluteString;
-    id wrapped = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-        if (data && !err && g_networkRules) {
-            @try { data = apply_regex_rules(data, urlStr); } @catch (__unused NSException *e) {}
-        }
-        if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, resp, err);
-    };
-    typedef id (*orig_fn)(id, SEL, id, id);
-    return ((orig_fn)g_orig_dataTask)(self, _cmd, req, wrapped);
-}
-
-static void enable_network_hook(NSArray *rules) {
-    if (!rules || rules.count == 0) return;
-    g_networkRules = rules;
-    Class cls = NSClassFromString(@"NSURLSession");
-    if (!cls) return;
-    SEL sel = @selector(dataTaskWithRequest:completionHandler:);
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
-    g_orig_dataTask = method_getImplementation(m);
-    method_setImplementation(m, (IMP)goat_dataTask_hook);
-}
+#pragma mark - 构造器
 __attribute__((constructor))
 static void GOATHookEntry(void) {
     @autoreleasepool {
