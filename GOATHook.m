@@ -233,10 +233,15 @@ static void enable_network_hook(NSArray *rules) {
         if (!m) continue;
         if (cls == [NSObject class]) continue;
 
-        IMP origImp = method_getImplementation(m);
+        // 跳过系统类（只hook App自己的delegate）
         NSString *clsName = NSStringFromClass(cls);
-        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
+        if ([clsName hasPrefix:@"NS"] || [clsName hasPrefix:@"__NS"]) continue;
+        if ([clsName hasPrefix:@"_NS"]) continue;
+        if ([clsName hasPrefix:@"CF"]) continue;
+        if ([clsName hasPrefix:@"__CF"]) continue;
 
+        IMP origImp = method_getImplementation(m);
+        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
         method_setImplementation(m, (IMP)goat_didReceiveData);
         hooked++;
     }
