@@ -155,51 +155,60 @@ static NSArray *g_networkRules = nil;
 @interface NSURLSession (GOATHook)
 - (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
                                   completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion;
+- (NSURLSessionDataTask *)goat_dataTaskWithURL:(NSURL *)url
+                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion;
 @end
 
 @implementation NSURLSession (GOATHook)
 
-- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
-                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
-    // 1. 包装 completion：在 ARC 域内创建 block，安全
-    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-        // 2. 正则替换
-        if (data && !err && g_networkRules) {
-            @try {
-                NSString *url = req.URL.absoluteString;
-                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                if (body) {
-                    BOOL modified = NO;
-                    for (NSDictionary *group in g_networkRules) {
-                        NSString *domain = group[@"domain"];
-                        if (domain && [url containsString:domain]) {
-                            for (NSDictionary *rule in group[@"rules"]) {
-                                NSString *key = rule[@"key"];
-                                NSString *val = rule[@"value"];
-                                if (key && val) {
-                                    NSRegularExpression *re = [NSRegularExpression
-                                        regularExpressionWithPattern:key options:0 error:nil];
-                                    if (re) {
-                                        body = [re stringByReplacingMatchesInString:body
-                                            options:0 range:NSMakeRange(0, body.length) withTemplate:val];
-                                        modified = YES;
-                                    }
-                                }
-                            }
+// 公共：对响应数据应用正则替换
++ (NSData *)goat_applyRules:(NSData *)data url:(NSString *)urlStr {
+    if (!data || !g_networkRules) return data;
+    @try {
+        NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!body) return data;
+        BOOL modified = NO;
+        for (NSDictionary *group in g_networkRules) {
+            NSString *domain = group[@"domain"];
+            if (domain && [urlStr containsString:domain]) {
+                for (NSDictionary *rule in group[@"rules"]) {
+                    NSString *key = rule[@"key"];
+                    NSString *val = rule[@"value"];
+                    if (key && val) {
+                        NSRegularExpression *re = [NSRegularExpression
+                            regularExpressionWithPattern:key options:0 error:nil];
+                        if (re) {
+                            body = [re stringByReplacingMatchesInString:body
+                                options:0 range:NSMakeRange(0, body.length) withTemplate:val];
+                            modified = YES;
                         }
                     }
-                    if (modified) {
-                        data = [body dataUsingEncoding:NSUTF8StringEncoding];
-                    }
                 }
-            } @catch (__unused NSException *e) {}
+            }
         }
-        // 3. 调用原始回调
+        if (modified) return [body dataUsingEncoding:NSUTF8StringEncoding];
+    } @catch (__unused NSException *e) {}
+    return data;
+}
+
+- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
+                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
+    NSString *urlStr = req.URL.absoluteString;
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+        data = [NSURLSession goat_applyRules:data url:urlStr];
         if (completion) completion(data, resp, err);
     };
-
-    // 4. 调回原始方法（已交换）
     return [self goat_dataTaskWithRequest:req completionHandler:wrapped];
+}
+
+- (NSURLSessionDataTask *)goat_dataTaskWithURL:(NSURL *)url
+                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
+    NSString *urlStr = url.absoluteString;
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+        data = [NSURLSession goat_applyRules:data url:urlStr];
+        if (completion) completion(data, resp, err);
+    };
+    return [self goat_dataTaskWithURL:url completionHandler:wrapped];
 }
 
 @end
@@ -209,15 +218,20 @@ static void enable_network_hook(NSArray *rules) {
     g_networkRules = rules;
 
     Class cls = [NSURLSession class];
-    SEL origSel = @selector(dataTaskWithRequest:completionHandler:);
-    SEL swizSel = @selector(goat_dataTaskWithRequest:completionHandler:);
 
-    Method origM = class_getInstanceMethod(cls, origSel);
-    Method swizM = class_getInstanceMethod(cls, swizSel);
+    // Hook dataTaskWithRequest:completionHandler:
+    SEL orig1 = @selector(dataTaskWithRequest:completionHandler:);
+    SEL swiz1 = @selector(goat_dataTaskWithRequest:completionHandler:);
+    Method m1 = class_getInstanceMethod(cls, orig1);
+    Method s1 = class_getInstanceMethod(cls, swiz1);
+    if (m1 && s1) method_exchangeImplementations(m1, s1);
 
-    if (origM && swizM) {
-        method_exchangeImplementations(origM, swizM);
-    }
+    // Hook dataTaskWithURL:completionHandler:
+    SEL orig2 = @selector(dataTaskWithURL:completionHandler:);
+    SEL swiz2 = @selector(goat_dataTaskWithURL:completionHandler:);
+    Method m2 = class_getInstanceMethod(cls, orig2);
+    Method s2 = class_getInstanceMethod(cls, swiz2);
+    if (m2 && s2) method_exchangeImplementations(m2, s2);
 }
 __attribute__((constructor))
 static void GOATHookEntry(void) {
