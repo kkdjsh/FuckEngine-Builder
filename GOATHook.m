@@ -151,12 +151,14 @@ static void apply_all_hooks(void) {
 
 #pragma mark - 网络响应拦截（delegate 方式，通用）
 static NSArray *g_networkRules = nil;
-static NSMutableDictionary *g_origImpMap = nil;
+static IMP g_origDidReceiveData = NULL;  // 全局保存原始IMP
 
 // 公共：对响应数据应用正则替换
 static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
-    if (!data || !g_networkRules) return data;
+    if (!data || !g_networkRules || !urlStr) return data;
     @try {
+        // 只处理小的JSON响应（>100KB的可能是图片/二进制，跳过）
+        if (data.length > 100 * 1024) return data;
         NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (!body) return data;
         BOOL modified = NO;
@@ -183,56 +185,58 @@ static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
     return data;
 }
 
-// 新方法：拦截 URLSession:dataTask:didReceiveData:
+// 拦截 URLSession:dataTask:didReceiveData:
 static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
                                  NSURLSessionDataTask *dataTask, NSData *data) {
-    // 从 map 里取原始 IMP
-    NSString *clsName = NSStringFromClass([self class]);
-    NSValue *val = [g_origImpMap objectForKey:clsName];
-    IMP origImp = val ? [val pointerValue] : NULL;
-
+    NSData *dataToPass = data;
     @try {
-        NSString *urlStr = dataTask.originalRequest.URL.absoluteString;
-        NSData *newData = goat_applyRules(data, urlStr);
-        if (newData != data && origImp) {
-            ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, newData);
-            return;
-        }
-    } @catch (__unused NSException *e) {}
+        NSString *urlStr = dataTask.currentRequest.URL.absoluteString;
+        if (!urlStr) urlStr = dataTask.originalRequest.URL.absoluteString;
+        if (!urlStr) urlStr = dataTask.response.URL.absoluteString;
+        dataToPass = goat_applyRules(data, urlStr);
+    } @catch (__unused NSException *e) {
+        dataToPass = data;  // 出错就原样返回
+    }
 
-    // 未修改或没有 orig，正常调用
-    if (origImp) {
-        ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, data);
+    // 无条件调用原始方法，绝对不丢数据
+    if (g_origDidReceiveData) {
+        ((void(*)(id, SEL, id, id, id))g_origDidReceiveData)(self, _cmd, session, dataTask, dataToPass);
     }
 }
 
 static void enable_network_hook(NSArray *rules) {
     if (!rules || rules.count == 0) return;
     g_networkRules = rules;
-    g_origImpMap = [NSMutableDictionary dictionary];
 
     SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
-
-    // 枚举所有已加载的类，找到实现了这个方法的
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return;
     Class *classes = (Class *)malloc(sizeof(Class) * count);
     objc_getClassList(classes, count);
 
-    int hooked = 0;
     for (int i = 0; i < count; i++) {
         Class cls = classes[i];
-        if (!cls) continue;
+        if (!cls || cls == [NSObject class]) continue;
+
+        // 只看这个类自己定义的方法
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        BOOL selfImplements = NO;
+        for (unsigned int j = 0; j < methodCount; j++) {
+            if (sel_isEqual(method_getName(methods[j]), targetSel)) {
+                selfImplements = YES;
+                break;
+            }
+        }
+        free(methods);
+        if (!selfImplements) continue;
+
         Method m = class_getInstanceMethod(cls, targetSel);
         if (!m) continue;
-        if (cls == [NSObject class]) continue;
 
-        IMP origImp = method_getImplementation(m);
-        NSString *clsName = NSStringFromClass(cls);
-        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
-
+        g_origDidReceiveData = method_getImplementation(m);
         method_setImplementation(m, (IMP)goat_didReceiveData);
-        hooked++;
+        break;  // 只hook第一个直接实现的类
     }
     free(classes);
 }
