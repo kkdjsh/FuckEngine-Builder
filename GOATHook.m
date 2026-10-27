@@ -151,6 +151,7 @@ static void apply_all_hooks(void) {
 
 #pragma mark - 网络响应拦截（delegate 方式，通用）
 static NSArray *g_networkRules = nil;
+static NSMutableDictionary *g_origImpMap = nil;
 
 // 公共：对响应数据应用正则替换
 static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
