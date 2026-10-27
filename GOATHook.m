@@ -1,7 +1,6 @@
 //
 //  GOATHook.m
-//  纯 C 函数 IMP 版本（不用 imp_implementationWithBlock）
-//  签名注入环境下最稳定
+//  纯 C 函数 IMP + 网络 Mock 版本
 //
 
 #import <Foundation/Foundation.h>
@@ -130,19 +129,76 @@ static void apply_all_hooks(void) {
         if (!obj) return;
 
         NSArray *hooks = nil;
+        NSArray *mocks = nil;
         if ([obj isKindOfClass:[NSArray class]]) {
             hooks = (NSArray *)obj;
         } else if ([obj isKindOfClass:[NSDictionary class]]) {
             hooks = obj[@"hooks"];
+            mocks = obj[@"networkMocks"];
         }
 
         for (NSDictionary *h in hooks) {
             @try { apply_single_hook(h); } @catch (__unused NSException *e) {}
         }
+
+        // 应用网络 mock
+        if (mocks) {
+            @try { apply_network_mocks(mocks); } @catch (__unused NSException *e) {}
+        }
     }
 }
 
-#pragma mark - 构造器
+#pragma mark - 网络 Mock
+static NSArray *g_mocks = nil;
+static IMP g_orig_dataTask = NULL;
+
+// 替换 NSURLSession dataTaskWithRequest:completionHandler: 的 IMP
+static id goat_dataTask_mock(id self, SEL _cmd, NSURLRequest *req, void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    // 检查 URL 是否匹配 mock
+    NSString *url = req.URL.absoluteString;
+    for (NSDictionary *mock in g_mocks) {
+        NSString *pattern = mock[@"urlContains"];
+        if (pattern && [url containsString:pattern]) {
+            // 匹配到了，直接返回假响应
+            NSString *body = mock[@"responseBody"] ?: @"{}";
+            NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
+            NSInteger code = [mock[@"statusCode"] integerValue] ?: 200;
+            NSHTTPURLResponse *resp = [[NSHTTPURLResponse alloc]
+                initWithURL:req.URL statusCode:code HTTPVersion:@"1.1"
+                headerFields:@{@"Content-Type": @"application/json"}];
+            // 异步调用 completion，模拟网络延迟
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                if (completion) completion(data, resp, nil);
+            });
+            // 返回一个空的 dataTask（不真发请求）
+            // 调用原始方法取消它
+            typedef id (*dt_fn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+            dt_fn orig = (dt_fn)g_orig_dataTask;
+            id task = orig(self, _cmd, req, ^(NSData *d, NSURLResponse *r, NSError *e) {});
+            return task;
+        }
+    }
+    // 不匹配，走原始方法
+    typedef id (*dt_fn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+    dt_fn orig = (dt_fn)g_orig_dataTask;
+    return orig(self, _cmd, req, completion);
+}
+
+static void apply_network_mocks(NSArray *mocks) {
+    if (!mocks || mocks.count == 0) return;
+    g_mocks = mocks;
+
+    // swizzle NSURLSession dataTaskWithRequest:completionHandler:
+    Class cls = NSClassFromString(@"NSURLSession");
+    if (!cls) return;
+    SEL sel = @selector(dataTaskWithRequest:completionHandler:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+
+    g_orig_dataTask = method_getImplementation(m);
+    method_setImplementation(m, (IMP)goat_dataTask_mock);
+}
 __attribute__((constructor))
 static void GOATHookEntry(void) {
     @autoreleasepool {
