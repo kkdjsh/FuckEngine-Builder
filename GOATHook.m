@@ -1,7 +1,6 @@
 //
 //  GOATHook.m
-//  纯 C 函数 IMP 版本（不用 imp_implementationWithBlock）
-//  签名注入环境下最稳定
+//  纯 C 函数 IMP + 网络 Mock 版本
 //
 
 #import <Foundation/Foundation.h>
@@ -130,19 +129,95 @@ static void apply_all_hooks(void) {
         if (!obj) return;
 
         NSArray *hooks = nil;
+        NSArray *networkRules = nil;
         if ([obj isKindOfClass:[NSArray class]]) {
             hooks = (NSArray *)obj;
         } else if ([obj isKindOfClass:[NSDictionary class]]) {
             hooks = obj[@"hooks"];
+            networkRules = obj[@"networkRules"];
         }
 
         for (NSDictionary *h in hooks) {
             @try { apply_single_hook(h); } @catch (__unused NSException *e) {}
         }
+
+        // 启用网络正则替换
+        if (networkRules) {
+            @try { enable_network_hook(networkRules); } @catch (__unused NSException *e) {}
+        }
     }
 }
 
-#pragma mark - 构造器
+#pragma mark - 网络响应拦截（OC方法交换，ARC域内创建Block）
+static NSArray *g_networkRules = nil;
+
+@interface NSURLSession (GOATHook)
+- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
+                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion;
+@end
+
+@implementation NSURLSession (GOATHook)
+
+- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
+                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
+    // 1. 包装 completion：在 ARC 域内创建 block，安全
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+        // 2. 正则替换
+        if (data && !err && g_networkRules) {
+            @try {
+                NSString *url = req.URL.absoluteString;
+                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (body) {
+                    BOOL modified = NO;
+                    for (NSDictionary *group in g_networkRules) {
+                        NSString *domain = group[@"domain"];
+                        if (domain && [url containsString:domain]) {
+                            for (NSDictionary *rule in group[@"rules"]) {
+                                NSString *key = rule[@"key"];
+                                NSString *val = rule[@"value"];
+                                if (key && val) {
+                                    NSRegularExpression *re = [NSRegularExpression
+                                        regularExpressionWithPattern:key options:0 error:nil];
+                                    if (re) {
+                                        body = [re stringByReplacingMatchesInString:body
+                                            options:0 range:NSMakeRange(0, body.length) withTemplate:val];
+                                        modified = YES;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (modified) {
+                        data = [body dataUsingEncoding:NSUTF8StringEncoding];
+                    }
+                }
+            } @catch (__unused NSException *e) {}
+        }
+        // 3. 调用原始回调
+        if (completion) completion(data, resp, err);
+    };
+
+    // 4. 调回原始方法（已交换）
+    return [self goat_dataTaskWithRequest:req completionHandler:wrapped];
+}
+
+@end
+
+static void enable_network_hook(NSArray *rules) {
+    if (!rules || rules.count == 0) return;
+    g_networkRules = rules;
+
+    Class cls = [NSURLSession class];
+    SEL origSel = @selector(dataTaskWithRequest:completionHandler:);
+    SEL swizSel = @selector(goat_dataTaskWithRequest:completionHandler:);
+
+    Method origM = class_getInstanceMethod(cls, origSel);
+    Method swizM = class_getInstanceMethod(cls, swizSel);
+
+    if (origM && swizM) {
+        method_exchangeImplementations(origM, swizM);
+    }
+}
 __attribute__((constructor))
 static void GOATHookEntry(void) {
     @autoreleasepool {
