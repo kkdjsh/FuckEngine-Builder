@@ -147,21 +147,7 @@ static void apply_all_hooks(void) {
             }
         }
         NSLog(@"[GOATHook] done: %d ok, %d fail", ok, fail);
-
-        // 弹窗显示结果（debug 用，3秒后自动消失）
-        NSString *msg = [NSString stringWithFormat:@"GOATHook\n成功 %d / 共 %lu 条",
-                         ok, (unsigned long)hooks.count];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GOATHook"
-                                                                        message:msg
-                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
-        while (top.presentedViewController) top = top.presentedViewController;
-        [top presentViewController:alert animated:YES completion:^{
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{
-                [alert dismissViewControllerAnimated:YES completion:nil];
-            });
-        }];
+        // 不弹窗了，避免和 App UI 冲突导致闪退
     }
 }
 
