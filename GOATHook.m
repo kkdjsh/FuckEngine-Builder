@@ -188,7 +188,7 @@ static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
                                  NSURLSessionDataTask *dataTask, NSData *data) {
     // 从 map 里取原始 IMP
     NSString *clsName = NSStringFromClass([self class]);
-    NSValue *val = g_origImpMap[clsName];
+    NSValue *val = [g_origImpMap objectForKey:clsName];
     IMP origImp = val ? [val pointerValue] : NULL;
 
     @try {
@@ -205,9 +205,6 @@ static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
         ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, data);
     }
 }
-
-// 保存原始 IMP（每个被 swizzle 的类都需要）
-static NSMutableDictionary *g_origImpMap = nil;
 
 static void enable_network_hook(NSArray *rules) {
     if (!rules || rules.count == 0) return;
@@ -226,18 +223,14 @@ static void enable_network_hook(NSArray *rules) {
     for (int i = 0; i < count; i++) {
         Class cls = classes[i];
         if (!cls) continue;
-        // 检查这个类是否实现了 URLSession:dataTask:didReceiveData:
         Method m = class_getInstanceMethod(cls, targetSel);
         if (!m) continue;
-        // 跳过 NSObject 本身（只是声明）
         if (cls == [NSObject class]) continue;
 
-        // 保存原始 IMP
         IMP origImp = method_getImplementation(m);
         NSString *clsName = NSStringFromClass(cls);
-        g_origImpMap[clsName] = [NSValue valueWithPointer:origImp];
+        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
 
-        // 替换为我们的实现
         method_setImplementation(m, (IMP)goat_didReceiveData);
         hooked++;
     }
