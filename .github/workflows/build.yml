@@ -36,6 +36,14 @@ jobs:
           echo "=== Sections ==="
           otool -l GOATHook.template.dylib | grep -A 4 "goat" | head -30
 
+      - name: Ad-hoc codesign dylib
+        run: |
+          # 非越狱环境必须签名，否则 dyld 拒绝加载
+          codesign --sign - --force --deep GOATHook.template.dylib
+          echo "=== Signature ==="
+          codesign -dv GOATHook.template.dylib 2>&1
+          ls -lh GOATHook.template.dylib
+
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
