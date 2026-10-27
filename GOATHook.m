@@ -147,7 +147,8 @@ __attribute__((constructor))
 static void GOATHookEntry(void) {
     @autoreleasepool {
         double delay = atof(g_delay);
-        if (delay <= 0) delay = 0.5;
+        if (delay <= 0) delay = 0.3;
+        if (delay > 1.0) delay = 0.3;  // 强制短延迟，避免广告先加载完
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
