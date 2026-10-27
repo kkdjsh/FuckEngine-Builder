@@ -28,50 +28,108 @@ __attribute__((used, section("__DATA,__goat_hk")))
 static char g_hooks_json[0x10000] = "@@GOATHOOK_HOOKCONFIG@@";
 
 #pragma mark - 返回常量 IMP 工厂
+static int count_params(Method method) {
+    // method_getNumberOfArguments 包含 self 和 _cmd，所以减去 2
+    return method_getNumberOfArguments(method) - 2;
+}
+
 static IMP make_return_constant_imp(Method method, id constant) {
     const char *ret_type = method_copyReturnType(method);
     char t = ret_type[0];
+    int nparams = count_params(method);
     free((void *)ret_type);
 
+    // 通用：不管返回类型，都创建一个忽略所有参数的 block
+    // 关键：block 签名必须和方法一致，否则 arm64 调用栈错乱
+    // 用 imp_implementationWithBlock 时，block 的参数个数必须 >= 方法参数个数
+    // 我们用最少的参数声明（self, _cmd），但通过 __attribute__((noescape)) 让编译器不检查
+
     switch (t) {
-        case 'v':
-            return imp_implementationWithBlock(^(id self, SEL _cmd) {});
+        case 'v': {
+            // void 返回：空实现。必须声明足够多的参数占位，否则 arm64 thunk 会崩
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^(id self, SEL _cmd) {});
+            } else if (nparams == 1) {
+                return imp_implementationWithBlock(^(id self, SEL _cmd, id a1) {});
+            } else {
+                return imp_implementationWithBlock(^(id self, SEL _cmd, id a1, id a2) {});
+            }
+        }
 
         case 'B':
         case 'c': {
             BOOL v = [constant boolValue];
-            return imp_implementationWithBlock(^BOOL(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^BOOL(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^BOOL(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 'i': {
             int v = [constant intValue];
-            return imp_implementationWithBlock(^int(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^int(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^int(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 's': {
             short v = [constant shortValue];
-            return imp_implementationWithBlock(^short(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^short(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^short(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 'l': {
             long v = [constant longValue];
-            return imp_implementationWithBlock(^long(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^long(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^long(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 'q': {
             long long v = [constant longLongValue];
-            return imp_implementationWithBlock(^long long(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^long long(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^long long(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 'f': {
             float v = [constant floatValue];
-            return imp_implementationWithBlock(^float(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^float(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^float(id self, SEL _cmd, id a1) { return v; });
+            }
         }
         case 'd': {
             double v = [constant doubleValue];
-            return imp_implementationWithBlock(^double(id self, SEL _cmd) { return v; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^double(id self, SEL _cmd) { return v; });
+            } else {
+                return imp_implementationWithBlock(^double(id self, SEL _cmd, id a1) { return v; });
+            }
         }
-        case '[': case '{': case '(':
-            return imp_implementationWithBlock(^id(id self, SEL _cmd) { return nil; });
+        case '[': case '{': case '(': {
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^id(id self, SEL _cmd) { return nil; });
+            } else {
+                return imp_implementationWithBlock(^id(id self, SEL _cmd, id a1) { return nil; });
+            }
+        }
 
         default: {
             id val = constant;
-            return imp_implementationWithBlock(^id(id self, SEL _cmd) { return val; });
+            if (nparams == 0) {
+                return imp_implementationWithBlock(^id(id self, SEL _cmd) { return val; });
+            } else if (nparams == 1) {
+                return imp_implementationWithBlock(^id(id self, SEL _cmd, id a1) { return val; });
+            } else {
+                return imp_implementationWithBlock(^id(id self, SEL _cmd, id a1, id a2) { return val; });
+            }
         }
     }
 }
