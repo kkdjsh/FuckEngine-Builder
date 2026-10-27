@@ -117,6 +117,7 @@ static void apply_single_hook(NSDictionary *hook) {
 }
 
 #pragma mark - 批量应用
+static void enable_network_hook(NSArray *rules);  // 前置声明
 static void apply_all_hooks(void) {
     @autoreleasepool {
         NSData *json_data = [NSData dataWithBytesNoCopy:g_hooks_json
