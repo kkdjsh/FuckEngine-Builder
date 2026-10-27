@@ -214,38 +214,42 @@ static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
 
 static void enable_network_hook(NSArray *rules) {
     if (!rules || rules.count == 0) return;
-    g_networkRules = rules;
-    g_origImpMap = [NSMutableDictionary dictionary];
 
-    SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
+    @try {
+        g_networkRules = rules;
+        g_origImpMap = [NSMutableDictionary dictionary];
 
-    // 枚举所有已加载的类，找到实现了这个方法的
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class *classes = (Class *)malloc(sizeof(Class) * count);
-    objc_getClassList(classes, count);
+        SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
 
-    int hooked = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        if (!cls) continue;
-        Method m = class_getInstanceMethod(cls, targetSel);
-        if (!m) continue;
-        if (cls == [NSObject class]) continue;
+        int count = objc_getClassList(NULL, 0);
+        if (count <= 0) return;
+        Class *classes = (Class *)malloc(sizeof(Class) * count);
+        objc_getClassList(classes, count);
 
-        // 跳过系统类（只hook App自己的delegate）
-        NSString *clsName = NSStringFromClass(cls);
-        if ([clsName hasPrefix:@"NS"] || [clsName hasPrefix:@"__NS"]) continue;
-        if ([clsName hasPrefix:@"_NS"]) continue;
-        if ([clsName hasPrefix:@"CF"]) continue;
-        if ([clsName hasPrefix:@"__CF"]) continue;
+        for (int i = 0; i < count; i++) {
+            @try {
+                Class cls = classes[i];
+                if (!cls) continue;
+                Method m = class_getInstanceMethod(cls, targetSel);
+                if (!m) continue;
+                if (cls == [NSObject class]) continue;
 
-        IMP origImp = method_getImplementation(m);
-        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
-        method_setImplementation(m, (IMP)goat_didReceiveData);
-        hooked++;
+                NSString *clsName = NSStringFromClass(cls);
+                // 跳过系统类
+                if ([clsName hasPrefix:@"NS"] || [clsName hasPrefix:@"__NS"]) continue;
+                if ([clsName hasPrefix:@"_NS"]) continue;
+                if ([clsName hasPrefix:@"CF"]) continue;
+                if ([clsName hasPrefix:@"__CF"]) continue;
+
+                IMP origImp = method_getImplementation(m);
+                [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
+                method_setImplementation(m, (IMP)goat_didReceiveData);
+            } @catch (__unused NSException *e) {}
+        }
+        free(classes);
+    } @catch (__unused NSException *e) {
+        // 整个网络hook失败就放弃，不影响OC hook
     }
-    free(classes);
 }
 __attribute__((constructor))
 static void GOATHookEntry(void) {
