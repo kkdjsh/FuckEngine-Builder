@@ -152,35 +152,36 @@ static void apply_all_hooks(void) {
 static NSArray *g_mocks = nil;
 static IMP g_orig_dataTask = NULL;
 
-// 替换 NSURLSession dataTaskWithRequest:completionHandler: 的 IMP
-static id goat_dataTask_mock(id self, SEL _cmd, NSURLRequest *req, void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    // 检查 URL 是否匹配 mock
+// 替换 NSURLSession dataTaskWithRequest:completionHandler:
+// 用 id 代替 block 类型，避免编译错误
+static id goat_dataTask_mock(id self, SEL _cmd, NSURLRequest *req, id completion) {
     NSString *url = req.URL.absoluteString;
     for (NSDictionary *mock in g_mocks) {
         NSString *pattern = mock[@"urlContains"];
         if (pattern && [url containsString:pattern]) {
-            // 匹配到了，直接返回假响应
             NSString *body = mock[@"responseBody"] ?: @"{}";
             NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
             NSInteger code = [mock[@"statusCode"] integerValue] ?: 200;
             NSHTTPURLResponse *resp = [[NSHTTPURLResponse alloc]
                 initWithURL:req.URL statusCode:code HTTPVersion:@"1.1"
                 headerFields:@{@"Content-Type": @"application/json"}];
-            // 异步调用 completion，模拟网络延迟
+            // 异步回调
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
-                if (completion) completion(data, resp, nil);
+                if (completion) {
+                    void (^cb)(NSData *, NSURLResponse *, NSError *) = completion;
+                    cb(data, resp, nil);
+                }
             });
-            // 返回一个空的 dataTask（不真发请求）
-            // 调用原始方法取消它
-            typedef id (*dt_fn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+            // 调原始方法但用空 completion（真请求发了但结果丢弃）
+            typedef id (*dt_fn)(id, SEL, id, id);
             dt_fn orig = (dt_fn)g_orig_dataTask;
-            id task = orig(self, _cmd, req, ^(NSData *d, NSURLResponse *r, NSError *e) {});
-            return task;
+            id empty = ^(NSData *d, NSURLResponse *r, NSError *e) {};
+            return orig(self, _cmd, req, empty);
         }
     }
-    // 不匹配，走原始方法
-    typedef id (*dt_fn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+    // 不匹配，走原始
+    typedef id (*dt_fn)(id, SEL, id, id);
     dt_fn orig = (dt_fn)g_orig_dataTask;
     return orig(self, _cmd, req, completion);
 }
@@ -189,7 +190,6 @@ static void apply_network_mocks(NSArray *mocks) {
     if (!mocks || mocks.count == 0) return;
     g_mocks = mocks;
 
-    // swizzle NSURLSession dataTaskWithRequest:completionHandler:
     Class cls = NSClassFromString(@"NSURLSession");
     if (!cls) return;
     SEL sel = @selector(dataTaskWithRequest:completionHandler:);
