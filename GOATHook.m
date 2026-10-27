@@ -152,11 +152,10 @@ static void apply_all_hooks(void) {
 #pragma mark - 网络响应拦截（delegate 方式，通用）
 static NSArray *g_networkRules = nil;
 static NSMutableDictionary *g_origImpMap = nil;
-static NSMutableSet *g_swizzledClasses = nil;
 
 // 公共：对响应数据应用正则替换
 static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
-    if (!data || !g_networkRules || !urlStr) return data;
+    if (!data || !g_networkRules) return data;
     @try {
         NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (!body) return data;
@@ -184,19 +183,16 @@ static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
     return data;
 }
 
-// 拦截 URLSession:dataTask:didReceiveData:
+// 新方法：拦截 URLSession:dataTask:didReceiveData:
 static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
                                  NSURLSessionDataTask *dataTask, NSData *data) {
+    // 从 map 里取原始 IMP
     NSString *clsName = NSStringFromClass([self class]);
     NSValue *val = [g_origImpMap objectForKey:clsName];
     IMP origImp = val ? [val pointerValue] : NULL;
 
     @try {
-        // 兜底：currentRequest → originalRequest → response.URL
-        NSString *urlStr = dataTask.currentRequest.URL.absoluteString;
-        if (!urlStr) urlStr = dataTask.originalRequest.URL.absoluteString;
-        if (!urlStr) urlStr = dataTask.response.URL.absoluteString;
-
+        NSString *urlStr = dataTask.originalRequest.URL.absoluteString;
         NSData *newData = goat_applyRules(data, urlStr);
         if (newData != data && origImp) {
             ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, newData);
@@ -204,74 +200,41 @@ static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
         }
     } @catch (__unused NSException *e) {}
 
+    // 未修改或没有 orig，正常调用
     if (origImp) {
         ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, data);
     }
-}
-
-// 枚举并 swizzle 所有直接实现了目标方法的类
-static int goat_scroll_and_swizzle(void) {
-    if (!g_networkRules) return 0;
-    if (!g_swizzledClasses) g_swizzledClasses = [NSMutableSet set];
-
-    SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return 0;
-    Class *classes = (Class *)malloc(sizeof(Class) * count);
-    objc_getClassList(classes, count);
-
-    int newlyHooked = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        if (!cls) continue;
-        NSString *clsName = NSStringFromClass(cls);
-        if ([g_swizzledClasses containsObject:clsName]) continue;
-
-        // 只看这个类自己定义的方法（不沿父类链）
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(cls, &methodCount);
-        BOOL selfImplements = NO;
-        for (unsigned int j = 0; j < methodCount; j++) {
-            if (sel_isEqual(method_getName(methods[j]), targetSel)) {
-                selfImplements = YES;
-                break;
-            }
-        }
-        free(methods);
-        if (!selfImplements) continue;
-
-        if (cls == [NSObject class]) continue;
-
-        Method m = class_getInstanceMethod(cls, targetSel);
-        if (!m) continue;
-
-        IMP origImp = method_getImplementation(m);
-        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
-        [g_swizzledClasses addObject:clsName];
-        method_setImplementation(m, (IMP)goat_didReceiveData);
-        newlyHooked++;
-    }
-    free(classes);
-    return newlyHooked;
 }
 
 static void enable_network_hook(NSArray *rules) {
     if (!rules || rules.count == 0) return;
     g_networkRules = rules;
     g_origImpMap = [NSMutableDictionary dictionary];
-    g_swizzledClasses = [NSMutableSet set];
 
-    // 第一次立即枚举
-    goat_scroll_and_swizzle();
+    SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
 
-    // 定时器：每1秒重新枚举，持续10秒（覆盖 Weex 等延迟加载的类）
-    __block int roundsLeft = 10;
-    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0
-        repeats:YES block:^(NSTimer *t) {
-        goat_scroll_and_swizzle();
-        roundsLeft--;
-        if (roundsLeft <= 0) [t invalidate];
-    }];
+    // 枚举所有已加载的类，找到实现了这个方法的
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    objc_getClassList(classes, count);
+
+    int hooked = 0;
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (!cls) continue;
+        Method m = class_getInstanceMethod(cls, targetSel);
+        if (!m) continue;
+        if (cls == [NSObject class]) continue;
+
+        IMP origImp = method_getImplementation(m);
+        NSString *clsName = NSStringFromClass(cls);
+        [g_origImpMap setObject:[NSValue valueWithPointer:origImp] forKey:clsName];
+
+        method_setImplementation(m, (IMP)goat_didReceiveData);
+        hooked++;
+    }
+    free(classes);
 }
 __attribute__((constructor))
 static void GOATHookEntry(void) {
