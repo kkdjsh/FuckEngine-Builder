@@ -149,20 +149,11 @@ static void apply_all_hooks(void) {
     }
 }
 
-#pragma mark - 网络响应拦截（OC方法交换，ARC域内创建Block）
+#pragma mark - 网络响应拦截（delegate 方式，通用）
 static NSArray *g_networkRules = nil;
 
-@interface NSURLSession (GOATHook)
-- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
-                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion;
-- (NSURLSessionDataTask *)goat_dataTaskWithURL:(NSURL *)url
-                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion;
-@end
-
-@implementation NSURLSession (GOATHook)
-
 // 公共：对响应数据应用正则替换
-+ (NSData *)goat_applyRules:(NSData *)data url:(NSString *)urlStr {
+static NSData *goat_applyRules(NSData *data, NSString *urlStr) {
     if (!data || !g_networkRules) return data;
     @try {
         NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -175,13 +166,13 @@ static NSArray *g_networkRules = nil;
                     NSString *key = rule[@"key"];
                     NSString *val = rule[@"value"];
                     if (key && val) {
+                        NSError *reErr = nil;
                         NSRegularExpression *re = [NSRegularExpression
-                            regularExpressionWithPattern:key options:0 error:nil];
-                        if (re) {
-                            body = [re stringByReplacingMatchesInString:body
-                                options:0 range:NSMakeRange(0, body.length) withTemplate:val];
-                            modified = YES;
-                        }
+                            regularExpressionWithPattern:key options:0 error:&reErr];
+                        if (reErr) continue;
+                        body = [re stringByReplacingMatchesInString:body
+                            options:0 range:NSMakeRange(0, body.length) withTemplate:val];
+                        modified = YES;
                     }
                 }
             }
@@ -191,47 +182,65 @@ static NSArray *g_networkRules = nil;
     return data;
 }
 
-- (NSURLSessionDataTask *)goat_dataTaskWithRequest:(NSURLRequest *)req
-                                  completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
-    NSString *urlStr = req.URL.absoluteString;
-    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-        data = [NSURLSession goat_applyRules:data url:urlStr];
-        if (completion) completion(data, resp, err);
-    };
-    return [self goat_dataTaskWithRequest:req completionHandler:wrapped];
+// 新方法：拦截 URLSession:dataTask:didReceiveData:
+static void goat_didReceiveData(id self, SEL _cmd, NSURLSession *session,
+                                 NSURLSessionDataTask *dataTask, NSData *data) {
+    // 从 map 里取原始 IMP
+    NSString *clsName = NSStringFromClass([self class]);
+    NSValue *val = g_origImpMap[clsName];
+    IMP origImp = val ? [val pointerValue] : NULL;
+
+    @try {
+        NSString *urlStr = dataTask.originalRequest.URL.absoluteString;
+        NSData *newData = goat_applyRules(data, urlStr);
+        if (newData != data && origImp) {
+            ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, newData);
+            return;
+        }
+    } @catch (__unused NSException *e) {}
+
+    // 未修改或没有 orig，正常调用
+    if (origImp) {
+        ((void(*)(id, SEL, id, id, id))origImp)(self, _cmd, session, dataTask, data);
+    }
 }
 
-- (NSURLSessionDataTask *)goat_dataTaskWithURL:(NSURL *)url
-                              completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completion {
-    NSString *urlStr = url.absoluteString;
-    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
-        data = [NSURLSession goat_applyRules:data url:urlStr];
-        if (completion) completion(data, resp, err);
-    };
-    return [self goat_dataTaskWithURL:url completionHandler:wrapped];
-}
-
-@end
+// 保存原始 IMP（每个被 swizzle 的类都需要）
+static NSMutableDictionary *g_origImpMap = nil;
 
 static void enable_network_hook(NSArray *rules) {
     if (!rules || rules.count == 0) return;
     g_networkRules = rules;
+    g_origImpMap = [NSMutableDictionary dictionary];
 
-    Class cls = [NSURLSession class];
+    SEL targetSel = @selector(URLSession:dataTask:didReceiveData:);
 
-    // Hook dataTaskWithRequest:completionHandler:
-    SEL orig1 = @selector(dataTaskWithRequest:completionHandler:);
-    SEL swiz1 = @selector(goat_dataTaskWithRequest:completionHandler:);
-    Method m1 = class_getInstanceMethod(cls, orig1);
-    Method s1 = class_getInstanceMethod(cls, swiz1);
-    if (m1 && s1) method_exchangeImplementations(m1, s1);
+    // 枚举所有已加载的类，找到实现了这个方法的
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    objc_getClassList(classes, count);
 
-    // Hook dataTaskWithURL:completionHandler:
-    SEL orig2 = @selector(dataTaskWithURL:completionHandler:);
-    SEL swiz2 = @selector(goat_dataTaskWithURL:completionHandler:);
-    Method m2 = class_getInstanceMethod(cls, orig2);
-    Method s2 = class_getInstanceMethod(cls, swiz2);
-    if (m2 && s2) method_exchangeImplementations(m2, s2);
+    int hooked = 0;
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (!cls) continue;
+        // 检查这个类是否实现了 URLSession:dataTask:didReceiveData:
+        Method m = class_getInstanceMethod(cls, targetSel);
+        if (!m) continue;
+        // 跳过 NSObject 本身（只是声明）
+        if (cls == [NSObject class]) continue;
+
+        // 保存原始 IMP
+        IMP origImp = method_getImplementation(m);
+        NSString *clsName = NSStringFromClass(cls);
+        g_origImpMap[clsName] = [NSValue valueWithPointer:origImp];
+
+        // 替换为我们的实现
+        method_setImplementation(m, (IMP)goat_didReceiveData);
+        hooked++;
+    }
+    free(classes);
 }
 __attribute__((constructor))
 static void GOATHookEntry(void) {
