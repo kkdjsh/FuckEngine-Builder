@@ -152,12 +152,9 @@ static void apply_all_hooks(void) {
 static NSArray *g_networkRules = nil;
 static IMP g_orig_dataTask = NULL;
 
-// 对响应数据应用正则替换
-static NSData *apply_regex_rules(NSData *data, NSURLRequest *req) {
-    NSString *url = req.URL.absoluteString;
+static NSData *apply_regex_rules(NSData *data, NSString *url) {
     NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!body) return data;
-
     BOOL modified = NO;
     for (NSDictionary *group in g_networkRules) {
         NSString *domain = group[@"domain"];
@@ -170,8 +167,7 @@ static NSData *apply_regex_rules(NSData *data, NSURLRequest *req) {
                         regularExpressionWithPattern:key options:0 error:nil];
                     if (re) {
                         body = [re stringByReplacingMatchesInString:body
-                            options:0 range:NSMakeRange(0, body.length)
-                            withTemplate:value];
+                            options:0 range:NSMakeRange(0, body.length) withTemplate:value];
                         modified = YES;
                     }
                 }
@@ -182,12 +178,12 @@ static NSData *apply_regex_rules(NSData *data, NSURLRequest *req) {
 }
 
 static id goat_dataTask_hook(id self, SEL _cmd, NSURLRequest *req, id completion) {
+    __block NSString *urlStr = req.URL.absoluteString;
     id wrapped = ^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (data && !err && g_networkRules) {
-            @try { data = apply_regex_rules(data, req); } @catch (__unused NSException *e) {}
+            @try { data = apply_regex_rules(data, urlStr); } @catch (__unused NSException *e) {}
         }
-        typedef void (^cb_t)(NSData *, NSURLResponse *, NSError *);
-        ((cb_t)completion)(data, resp, err);
+        if (completion) ((void(^)(NSData*,NSURLResponse*,NSError*))completion)(data, resp, err);
     };
     typedef id (*orig_fn)(id, SEL, id, id);
     return ((orig_fn)g_orig_dataTask)(self, _cmd, req, wrapped);
