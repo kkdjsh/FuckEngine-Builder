@@ -1,7 +1,6 @@
 //
 //  GOATHook.m
-//  纯 C 函数 IMP 版本（不用 imp_implementationWithBlock）
-//  签名注入环境下最稳定
+//  纯 C 函数 IMP + 网络 Mock 版本
 //
 
 #import <Foundation/Foundation.h>
@@ -139,10 +138,82 @@ static void apply_all_hooks(void) {
         for (NSDictionary *h in hooks) {
             @try { apply_single_hook(h); } @catch (__unused NSException *e) {}
         }
+
+        // 启用网络响应拦截（自动改 VIP 字段）
+        @try { enable_network_hook(); } @catch (__unused NSException *e) {}
     }
 }
 
-#pragma mark - 构造器
+#pragma mark - 网络响应拦截（透传+改JSON）
+static IMP g_orig_dataTask = NULL;
+
+// 递归修改 JSON 里的 VIP 字段
+static void unlock_vip_in_json(id json) {
+    if ([json isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *dict = (NSMutableDictionary *)json;
+        for (NSString *key in [dict allKeys]) {
+            id val = dict[key];
+            if ([val isKindOfClass:[NSDictionary class]] || [val isKindOfClass:[NSArray class]]) {
+                unlock_vip_in_json(val);
+            }
+        }
+        // 常见 VIP 字段名
+        NSArray *vipKeys = @[@"isVip", @"vip", @"isPro", @"pro", @"isPremium",
+                             @"premium", @"isMember", @"member", @"isPaid",
+                             @"paid", @"isUnlocked", @"unlocked", @"isSubscribed",
+                             @"subscription", @"expireDate", @"expires_at"];
+        for (NSString *k in vipKeys) {
+            if (dict[k]) {
+                if ([k isEqualToString:@"expireDate"] || [k isEqualToString:@"expires_at"]) {
+                    dict[k] = @"2099-12-31T23:59:59Z";
+                } else if ([dict[k] isKindOfClass:[NSString class]]) {
+                    dict[k] = @"true";
+                } else {
+                    dict[k] = @YES;
+                }
+            }
+        }
+    } else if ([json isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)json) {
+            unlock_vip_in_json(item);
+        }
+    }
+}
+
+// 替换 NSURLSession dataTaskWithRequest:completionHandler:
+static id goat_dataTask_hook(id self, SEL _cmd, NSURLRequest *req, id completion) {
+    // 包装 completion：拿到响应后改 JSON
+    id wrapped = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (data && !err) {
+            @try {
+                NSError *jsonErr = nil;
+                id json = [NSJSONSerialization JSONObjectWithData:data
+                    options:NSJSONReadingMutableContainers error:&jsonErr];
+                if (json && !jsonErr) {
+                    unlock_vip_in_json(json);
+                    NSData *newData = [NSJSONSerialization dataWithJSONObject:json
+                        options:0 error:nil];
+                    if (newData) data = newData;
+                }
+            } @catch (__unused NSException *e) {}
+        }
+        // 调原始 completion
+        typedef void (^cb_t)(NSData *, NSURLResponse *, NSError *);
+        ((cb_t)completion)(data, resp, err);
+    };
+    typedef id (*orig_fn)(id, SEL, id, id);
+    return ((orig_fn)g_orig_dataTask)(self, _cmd, req, wrapped);
+}
+
+static void enable_network_hook(void) {
+    Class cls = NSClassFromString(@"NSURLSession");
+    if (!cls) return;
+    SEL sel = @selector(dataTaskWithRequest:completionHandler:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    g_orig_dataTask = method_getImplementation(m);
+    method_setImplementation(m, (IMP)goat_dataTask_hook);
+}
 __attribute__((constructor))
 static void GOATHookEntry(void) {
     @autoreleasepool {
