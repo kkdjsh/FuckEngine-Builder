@@ -1,37 +1,31 @@
-name: Build GOATHook Tweak
+name: Build Custom Tweak
 
 on:
+  push:
+    paths:
+      - 'CustomTweak.xm'
   workflow_dispatch:
-    inputs:
-      source_code_b64:
-        description: 'Base64 encoded Logos source code'
-        required: true
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Theos
         run: |
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
           git clone --recursive https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
 
-      - name: Write source
+      - name: Create project
         run: |
-          mkdir -p GOATHookTweak
-          echo '${{ github.event.inputs.source_code_b64 }}' | base64 -d > GOATHookTweak/Tweak.xm
-          cat GOATHookTweak/Tweak.xm
-
-      - name: Write Makefile
-        run: |
-          cat > GOATHookTweak/Makefile << 'MAKEEOF'
+          mkdir -p Project
+          cp CustomTweak.xm Project/Tweak.xm
+          cat > Project/Makefile << 'MAKEEOF'
 TARGET = iphone:clang:14.5:14.0
 ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
-TWEAK_NAME = GOATHookBuild
+TWEAK_NAME = CustomTweak
 $(TWEAK_NAME)_FILES = Tweak.xm
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc
 $(TWEAK_NAME)_FRAMEWORKS = Foundation UIKit
@@ -40,15 +34,15 @@ MAKEEOF
 
       - name: Compile
         run: |
-          cd GOATHookTweak
-          make THEOS=/opt/theos FINALPACKAGE=1 2>&1 | tee build.log
-          if [ ! -f ".theos/_/GOATHookBuild.dylib" ]; then
-            echo "ERROR: dylib not found"
-            exit 1
-          fi
+          cd Project
+          make THEOS=/opt/theos FINALPACKAGE=1
 
-      - name: Upload dylib
+      - name: Codesign
+        run: |
+          codesign --sign - --force --deep Project/.theos/_/CustomTweak.dylib
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: GOATHook-dylib
-          path: GOATHookTweak/.theos/_/GOATHookBuild.dylib
+          name: CustomTweak-dylib
+          path: Project/.theos/_/CustomTweak.dylib
