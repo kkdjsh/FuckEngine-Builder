@@ -39,54 +39,8 @@ jobs:
           codesign --sign - --force --deep GOATHook.template.dylib
           ls -lh GOATHook.template.dylib
 
-      - name: Upload template dylib
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: GOATHook-template-dylib
           path: GOATHook.template.dylib
-
-      - name: Check for custom tweak
-        id: check
-        run: |
-          if [ -f CustomTweak.xm ]; then
-            echo "has_tweak=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_tweak=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Setup Theos for custom tweak
-        if: steps.check.outputs.has_tweak == 'true'
-        run: |
-          git clone --recursive https://github.com/theos/theos.git /opt/theos
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
-
-      - name: Compile custom tweak
-        if: steps.check.outputs.has_tweak == 'true'
-        run: |
-          mkdir -p CustomTweakProject
-          cp CustomTweak.xm CustomTweakProject/Tweak.xm
-          cat > CustomTweakProject/Makefile << 'MAKEEOF'
-TARGET = iphone:clang:14.5:14.0
-ARCHS = arm64 arm64e
-include $(THEOS)/makefiles/common.mk
-TWEAK_NAME = CustomTweak
-$(TWEAK_NAME)_FILES = Tweak.xm
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc
-$(TWEAK_NAME)_FRAMEWORKS = Foundation UIKit
-include $(THEOS_MAKE_PATH)/tweak.mk
-MAKEEOF
-          cd CustomTweakProject
-          make THEOS=/opt/theos FINALPACKAGE=1 2>&1 | tee build.log
-          ls -lh .theos/_/CustomTweak.dylib
-
-      - name: Codesign custom tweak
-        if: steps.check.outputs.has_tweak == 'true'
-        run: |
-          codesign --sign - --force --deep CustomTweakProject/.theos/_/CustomTweak.dylib
-
-      - name: Upload custom tweak
-        if: steps.check.outputs.has_tweak == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: CustomTweak-dylib
-          path: CustomTweakProject/.theos/_/CustomTweak.dylib
