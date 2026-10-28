@@ -12,37 +12,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Theos
-        run: |
-          git clone --recursive https://github.com/theos/theos.git /opt/theos
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
-      - name: Create project
+      - name: Compile with clang
         run: |
-          mkdir -p Project
-          cp CustomTweak.xm Project/Tweak.xm
-          cat > Project/Makefile << 'MAKEEOF'
-TARGET = iphone:clang:14.5:14.0
-ARCHS = arm64 arm64e
-include $(THEOS)/makefiles/common.mk
-TWEAK_NAME = CustomTweak
-$(TWEAK_NAME)_FILES = Tweak.xm
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc
-$(TWEAK_NAME)_FRAMEWORKS = Foundation UIKit
-include $(THEOS_MAKE_PATH)/tweak.mk
-MAKEEOF
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
 
-      - name: Compile
-        run: |
-          cd Project
-          make THEOS=/opt/theos FINALPACKAGE=1
+          # 直接编译xm为mm（Logos简单语法我们自己处理）
+          # 先用perl logos预处理（如果有logos）
+          # 简单方式：直接当objc++编译
+          cp CustomTweak.xm CustomTweak.mm
+
+          clang -arch arm64 -arch arm64e \
+            -isysroot "$SDK" \
+            -dynamiclib \
+            -O2 \
+            -fobjc-arc \
+            -install_name "CustomTweak.dylib" \
+            -o CustomTweak.dylib \
+            CustomTweak.mm \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreFoundation
+
+          ls -lh CustomTweak.dylib
 
       - name: Codesign
         run: |
-          codesign --sign - --force --deep Project/.theos/_/CustomTweak.dylib
+          codesign --sign - --force --deep CustomTweak.dylib
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: CustomTweak-dylib
-          path: Project/.theos/_/CustomTweak.dylib
+          path: CustomTweak.dylib
