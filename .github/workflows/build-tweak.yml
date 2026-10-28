@@ -1,0 +1,46 @@
+name: Build GOATHook Tweak
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_code:
+        description: 'Logos source code'
+        required: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          git clone --recursive https://github.com/theos/theos.git /opt/theos
+
+      - name: Create source
+        run: |
+          mkdir -p GOATHookTweak
+          echo '${{ github.event.inputs.source_code }}' > GOATHookTweak/Tweak.xm
+          cat > GOATHookTweak/Makefile << 'EOF'
+TARGET = iphone:clang:14.5:14.0
+ARCHS = arm64 arm64e
+include $(THEOS)/makefiles/common.mk
+TWEAK_NAME = GOATHookBuild
+$(TWEAK_NAME)_FILES = Tweak.xm
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc
+$(TWEAK_NAME)_FRAMEWORKS = Foundation UIKit
+include $(THEOS_MAKE_PATH)/tweak.mk
+EOF
+
+      - name: Compile
+        run: |
+          cd GOATHookTweak
+          make package THEOS=/opt/theos FINALPACKAGE=1
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: GOATHook-dylib
+          path: GOATHookTweak/.theos/_/GOATHookBuild.dylib
